@@ -1,0 +1,122 @@
+cat <<'EOF' > docker-compose.yml
+version: "3.9"
+
+services:
+  tm-postgres-core:
+    image: postgres:16
+    container_name: tm-postgres-core
+    environment:
+      POSTGRES_DB: core
+      POSTGRES_USER: core
+      POSTGRES_PASSWORD: core
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U core"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  tm-postgres-auth:
+    image: postgres:16
+    container_name: tm-postgres-auth
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  tm-redis:
+    image: redis:7
+    container_name: tm-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  tm-dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: tm-dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "8000:8000"
+
+  tm-auth-service:
+    build: ./auth-service
+    container_name: tm-auth-service
+    environment:
+      DATABASE_URL: postgres://auth:auth@tm-postgres-auth:5432/auth?sslmode=disable
+      MASTER_KEY: dev-master-key
+    ports:
+      - "8001:8001"
+    depends_on:
+      tm-postgres-auth:
+        condition: service_healthy
+
+  tm-flag-service:
+    build: ./flag-service
+    container_name: tm-flag-service
+    environment:
+      DATABASE_URL: postgres://core:core@tm-postgres-core:5432/core
+      AUTH_SERVICE_URL: http://tm-auth-service:8001
+    ports:
+      - "8002:8002"
+    depends_on:
+      tm-postgres-core:
+        condition: service_healthy
+      tm-auth-service:
+        condition: service_started
+
+  tm-targeting-service:
+    build: ./targeting-service
+    container_name: tm-targeting-service
+    environment:
+      DATABASE_URL: postgres://core:core@tm-postgres-core:5432/core
+      AUTH_SERVICE_URL: http://tm-auth-service:8001
+    ports:
+      - "8003:8003"
+    depends_on:
+      tm-postgres-core:
+        condition: service_healthy
+      tm-auth-service:
+        condition: service_started
+
+  tm-evaluation-service:
+    build: ./evaluation-service
+    container_name: tm-evaluation-service
+    environment:
+      AWS_REGION: us-east-1
+      AWS_SQS_URL: http://tm-dynamodb-local:8000
+      AWS_DYNAMODB_TABLE: evaluations
+      TARGETING_SERVICE_URL: http://tm-targeting-service:8003
+    ports:
+      - "8004:8004"
+    depends_on:
+      tm-targeting-service:
+        condition: service_started
+
+  tm-analytics-service:
+    build: ./analytics-service
+    container_name: tm-analytics-service
+    environment:
+      AWS_PROFILE: default
+      AWS_REGION: us-east-1
+      AWS_SQS_URL: http://tm-dynamodb-local:8000
+      AWS_DYNAMODB_TABLE: evaluations
+    volumes:
+      - ~/.aws:/root/.aws:ro
+    ports:
+      - "8005:8005"
+    depends_on:
+      tm-dynamodb-local:
+        condition: service_started
+  EOF
